@@ -1,27 +1,20 @@
-// backend/server.js
+// server.js
 const express = require('express');
 const cors = require('cors');
-const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');  // To hash passwords
 const { createServer } = require('http');
 const { Server } = require('socket.io');
-const { Pool } = require('pg');
-require('dotenv').config();
+const prisma = require('./models/db'); // Prisma client connection
+const authMiddleware = require('./middlewares/authMiddleware'); // Authentication middleware
 
+// Initialize express app and HTTP server
 const app = express();
 const server = createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: ["http://localhost:3000", "http://localhost:3001"],
+        origin: ["http://localhost:3000", "https://termiclad-frontend.vercel.app"], // Frontend URLs
         methods: ["GET", "POST"]
-    }
-});
-
-// Database connection
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: {
-        rejectUnauthorized: false
     }
 });
 
@@ -29,169 +22,90 @@ const pool = new Pool({
 app.use(cors());
 app.use(express.json());
 
-// Auth middleware
-const authenticateToken = (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
+// Health check route
+app.get('/api/health', (req, res) => {
+    res.json({ status: 'OK', message: 'Backend is running' });
+});
 
-    if (!token) {
-        return res.status(401).json({ message: 'Access token required' });
-    }
-
-    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-        if (err) {
-            return res.status(403).json({ message: 'Invalid token' });
-        }
-        req.user = user;
-        next();
-    });
-};
-
-// Initialize database tables
-const initializeDatabase = async () => {
-    try {
-        await pool.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        username VARCHAR(50) UNIQUE NOT NULL,
-        email VARCHAR(100) UNIQUE NOT NULL,
-        password_hash VARCHAR(255) NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        is_online BOOLEAN DEFAULT false
-      )
-    `);
-
-        await pool.query(`
-      CREATE TABLE IF NOT EXISTS messages (
-        id SERIAL PRIMARY KEY,
-        sender_id INTEGER REFERENCES users(id),
-        receiver_id INTEGER REFERENCES users(id),
-        message TEXT NOT NULL,
-        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        is_read BOOLEAN DEFAULT false
-      )
-    `);
-
-        await pool.query(`
-      CREATE TABLE IF NOT EXISTS group_chats (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(100) NOT NULL,
-        created_by INTEGER REFERENCES users(id),
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-        await pool.query(`
-      CREATE TABLE IF NOT EXISTS group_messages (
-        id SERIAL PRIMARY KEY,
-        group_id INTEGER REFERENCES group_chats(id),
-        sender_id INTEGER REFERENCES users(id),
-        message TEXT NOT NULL,
-        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-        await pool.query(`
-      CREATE TABLE IF NOT EXISTS group_members (
-        id SERIAL PRIMARY KEY,
-        group_id INTEGER REFERENCES group_chats(id),
-        user_id INTEGER REFERENCES users(id),
-        joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(group_id, user_id)
-      )
-    `);
-
-        console.log('Database tables initialized successfully');
-    } catch (error) {
-        console.error('Error initializing database:', error);
-    }
-};
-
-// Routes
-
-// Register
 app.post('/api/register', async (req, res) => {
+    const { username, email, password } = req.body;
+
+    console.log("Registration Request:", { username, email, password });
+
+    if (!username || !email || !password) {
+        console.log("Missing fields in registration request");
+        return res.status(400).json({ message: 'All fields (username, email, password) are required' });
+    }
+
     try {
-        const { username, email, password } = req.body;
+        console.log("Checking if email exists...");
+        const existingUser = await prisma.user.findUnique({ where: { email } });
 
-        if (!username || !email || !password) {
-            return res.status(400).json({ message: 'All fields are required' });
+        if (existingUser) {
+            console.log("Email already in use");
+            return res.status(400).json({ message: 'Email is already in use' });
         }
 
-        // Check if user exists
-        const userExists = await pool.query(
-            'SELECT id FROM users WHERE email = $1 OR username = $2',
-            [email, username]
-        );
+        console.log("Hashing password...");
+        const hashedPassword = await bcrypt.hash(password, 10);
 
-        if (userExists.rows.length > 0) {
-            return res.status(400).json({ message: 'User already exists' });
-        }
+        console.log("Creating user...");
+        const newUser = await prisma.user.create({
+            data: {
+                username,
+                email,
+                password: hashedPassword,
+            },
+        });
 
-        // Hash password
-        const saltRounds = 10;
-        const passwordHash = await bcrypt.hash(password, saltRounds);
+        console.log("User Created:", newUser);
 
-        // Create user
-        const result = await pool.query(
-            'INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id, username, email',
-            [username, email, passwordHash]
-        );
-
-        const user = result.rows[0];
-        const token = jwt.sign({ userId: user.id, username: user.username }, process.env.JWT_SECRET);
-
-        res.status(201).json({
-            message: 'User created successfully',
-            token,
-            user: { id: user.id, username: user.username, email: user.email }
+        return res.status(201).json({
+            message: 'User registered successfully',
+            user: { id: newUser.id, username: newUser.username, email: newUser.email },
         });
     } catch (error) {
-        console.error('Registration error:', error);
-        res.status(500).json({ message: 'Server error' });
+        console.error("Error during registration:", error);
+        if (error instanceof Prisma.PrismaClientKnownRequestError) {
+            return res.status(400).json({ message: `Database error: ${error.message}` });
+        }
+        res.status(500).json({ message: 'Internal server error, please try again later' });
     }
 });
 
-// Login
+
+
+// User Login
 app.post('/api/login', async (req, res) => {
+    const { email, password } = req.body;
+
+    // Validate input
+    if (!email || !password) {
+        return res.status(400).json({ message: 'Email and password are required' });
+    }
+
     try {
-        const { email, password } = req.body;
+        // Check if user exists
+        const user = await prisma.user.findUnique({ where: { email } });
 
-        if (!email || !password) {
-            return res.status(400).json({ message: 'Email and password are required' });
+        if (!user) {
+            return res.status(400).json({ message: 'Invalid email or password' });
         }
 
-        // Find user
-        const result = await pool.query(
-            'SELECT id, username, email, password_hash FROM users WHERE email = $1',
-            [email]
-        );
+        // Compare the password with the stored hash
+        const isPasswordValid = await bcrypt.compare(password, user.password);
 
-        if (result.rows.length === 0) {
-            return res.status(400).json({ message: 'Invalid credentials' });
+        if (!isPasswordValid) {
+            return res.status(400).json({ message: 'Invalid email or password' });
         }
 
-        const user = result.rows[0];
+        // Generate JWT token
+        const token = jwt.sign({ userId: user.id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '1h' });
 
-        // Check password
-        const validPassword = await bcrypt.compare(password, user.password_hash);
-        if (!validPassword) {
-            return res.status(400).json({ message: 'Invalid credentials' });
-        }
-
-        // Update online status
-        await pool.query(
-            'UPDATE users SET is_online = true, last_seen = CURRENT_TIMESTAMP WHERE id = $1',
-            [user.id]
-        );
-
-        const token = jwt.sign({ userId: user.id, username: user.username }, process.env.JWT_SECRET);
-
-        res.json({
+        res.status(200).json({
             message: 'Login successful',
+            user: { id: user.id, email: user.email },
             token,
-            user: { id: user.id, username: user.username, email: user.email }
         });
     } catch (error) {
         console.error('Login error:', error);
@@ -199,76 +113,43 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
-// Get all users (for chat list)
-app.get('/api/users', authenticateToken, async (req, res) => {
-    try {
-        const result = await pool.query(
-            'SELECT id, username, is_online, last_seen FROM users WHERE id != $1 ORDER BY is_online DESC, username ASC',
-            [req.user.userId]
-        );
+// Create Server Route (Group chat)
+const createServerRoute = async (req, res) => {
+    const { name } = req.body;
 
-        res.json(result.rows);
-    } catch (error) {
-        console.error('Get users error:', error);
-        res.status(500).json({ message: 'Server error' });
+    if (!name) {
+        return res.status(400).json({ message: 'Server name is required' });
     }
-});
 
-// Get messages between two users
-app.get('/api/messages/:userId', authenticateToken, async (req, res) => {
     try {
-        const { userId } = req.params;
-        const result = await pool.query(
-            `SELECT m.*, u.username as sender_username 
-       FROM messages m 
-       JOIN users u ON m.sender_id = u.id 
-       WHERE (m.sender_id = $1 AND m.receiver_id = $2) 
-          OR (m.sender_id = $2 AND m.receiver_id = $1) 
-       ORDER BY m.timestamp ASC`,
-            [req.user.userId, userId]
-        );
-
-        // Mark messages as read
-        await pool.query(
-            'UPDATE messages SET is_read = true WHERE sender_id = $1 AND receiver_id = $2',
-            [userId, req.user.userId]
-        );
-
-        res.json(result.rows);
-    } catch (error) {
-        console.error('Get messages error:', error);
-        res.status(500).json({ message: 'Server error' });
-    }
-});
-
-// Send message
-app.post('/api/messages', authenticateToken, async (req, res) => {
-    try {
-        const { receiverId, message } = req.body;
-
-        if (!receiverId || !message) {
-            return res.status(400).json({ message: 'Receiver ID and message are required' });
-        }
-
-        const result = await pool.query(
-            'INSERT INTO messages (sender_id, receiver_id, message) VALUES ($1, $2, $3) RETURNING *',
-            [req.user.userId, receiverId, message]
-        );
-
-        const newMessage = result.rows[0];
-
-        // Emit to receiver via socket
-        io.to(`user_${receiverId}`).emit('new_message', {
-            ...newMessage,
-            sender_username: req.user.username
+        // Create the new server (group chat)
+        const newGroup = await prisma.groupChat.create({
+            data: {
+                name,
+                createdById: req.user.userId,
+            }
         });
 
-        res.status(201).json(newMessage);
+        // Add the creator as the first member of the group
+        await prisma.groupMember.create({
+            data: {
+                groupId: newGroup.id,
+                userId: req.user.userId
+            }
+        });
+
+        res.status(201).json({
+            message: 'Server created successfully',
+            server: newGroup
+        });
     } catch (error) {
-        console.error('Send message error:', error);
+        console.error('Create server error:', error);
         res.status(500).json({ message: 'Server error' });
     }
-});
+};
+
+// API to create a new server (group chat)
+app.post('/api/create-server', authMiddleware, createServerRoute);
 
 // Socket.io connection handling
 io.on('connection', (socket) => {
@@ -280,29 +161,29 @@ io.on('connection', (socket) => {
     });
 
     socket.on('send_message', async (data) => {
+        const { senderId, receiverId, message } = data;
+
         try {
-            const { senderId, receiverId, message } = data;
+            // Save the message to the database
+            const newMessage = await prisma.message.create({
+                data: {
+                    senderId,
+                    receiverId,
+                    message,
+                }
+            });
 
-            // Save to database
-            const result = await pool.query(
-                'INSERT INTO messages (sender_id, receiver_id, message) VALUES ($1, $2, $3) RETURNING *',
-                [senderId, receiverId, message]
-            );
-
-            const newMessage = result.rows[0];
-
-            // Get sender username
-            const senderResult = await pool.query(
-                'SELECT username FROM users WHERE id = $1',
-                [senderId]
-            );
+            // Get sender's username
+            const sender = await prisma.user.findUnique({
+                where: { id: senderId }
+            });
 
             const messageWithUsername = {
                 ...newMessage,
-                sender_username: senderResult.rows[0].username
+                sender_username: sender.username
             };
 
-            // Emit to receiver
+            // Emit to receiver via socket
             io.to(`user_${receiverId}`).emit('new_message', messageWithUsername);
 
             // Emit back to sender for confirmation
@@ -318,16 +199,8 @@ io.on('connection', (socket) => {
     });
 });
 
-// Health check
-app.get('/api/health', (req, res) => {
-    res.json({ status: 'OK', message: 'Termiclad backend is running' });
-});
-
+// Server Initialization
 const PORT = process.env.PORT || 5000;
-
-// Initialize database and start server
-initializeDatabase().then(() => {
-    server.listen(PORT, () => {
-        console.log(`Termiclad backend running on port ${PORT}`);
-    });
+server.listen(PORT, () => {
+    console.log(`Backend running on port ${PORT}`);
 });

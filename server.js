@@ -2,10 +2,9 @@
 const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');  // To hash passwords
 const { createServer } = require('http');
 const { Server } = require('socket.io');
-const prisma = require('./models/db'); // Prisma client connection
+const pool = require('./models/db'); // Database connection
 const authMiddleware = require('./middlewares/authMiddleware'); // Authentication middleware
 
 // Initialize express app and HTTP server
@@ -13,7 +12,7 @@ const app = express();
 const server = createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: ["http://localhost:3000", "https://termiclad-frontend.vercel.app"], // Frontend URLs
+        origin: ["http://localhost:3000", "https://your-frontend-url.vercel.app"], // Frontend URLs
         methods: ["GET", "POST"]
     }
 });
@@ -27,93 +26,19 @@ app.get('/api/health', (req, res) => {
     res.json({ status: 'OK', message: 'Backend is running' });
 });
 
-app.post('/api/register', async (req, res) => {
-    const { username, email, password } = req.body;
+// Authentication Middleware
+const authenticateToken = (req, res, next) => {
+    const token = req.headers['authorization']?.split(' ')[1];
+    if (!token) return res.status(401).json({ message: 'Access token required' });
 
-    console.log("Registration Request:", { username, email, password });
+    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+        if (err) return res.status(403).json({ message: 'Invalid token' });
+        req.user = user;
+        next();
+    });
+};
 
-    if (!username || !email || !password) {
-        console.log("Missing fields in registration request");
-        return res.status(400).json({ message: 'All fields (username, email, password) are required' });
-    }
-
-    try {
-        console.log("Checking if email exists...");
-        const existingUser = await prisma.user.findUnique({ where: { email } });
-
-        if (existingUser) {
-            console.log("Email already in use");
-            return res.status(400).json({ message: 'Email is already in use' });
-        }
-
-        console.log("Hashing password...");
-        const hashedPassword = await bcrypt.hash(password, 10);
-
-        console.log("Creating user...");
-        const newUser = await prisma.user.create({
-            data: {
-                username,
-                email,
-                password: hashedPassword,
-            },
-        });
-
-        console.log("User Created:", newUser);
-
-        return res.status(201).json({
-            message: 'User registered successfully',
-            user: { id: newUser.id, username: newUser.username, email: newUser.email },
-        });
-    } catch (error) {
-        console.error("Error during registration:", error);
-        if (error instanceof Prisma.PrismaClientKnownRequestError) {
-            return res.status(400).json({ message: `Database error: ${error.message}` });
-        }
-        res.status(500).json({ message: 'Internal server error, please try again later' });
-    }
-});
-
-
-
-// User Login
-app.post('/api/login', async (req, res) => {
-    const { email, password } = req.body;
-
-    // Validate input
-    if (!email || !password) {
-        return res.status(400).json({ message: 'Email and password are required' });
-    }
-
-    try {
-        // Check if user exists
-        const user = await prisma.user.findUnique({ where: { email } });
-
-        if (!user) {
-            return res.status(400).json({ message: 'Invalid email or password' });
-        }
-
-        // Compare the password with the stored hash
-        const isPasswordValid = await bcrypt.compare(password, user.password);
-
-        if (!isPasswordValid) {
-            return res.status(400).json({ message: 'Invalid email or password' });
-        }
-
-        // Generate JWT token
-        const token = jwt.sign({ userId: user.id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '1h' });
-
-        res.status(200).json({
-            message: 'Login successful',
-            user: { id: user.id, email: user.email },
-            token,
-        });
-    } catch (error) {
-        console.error('Login error:', error);
-        res.status(500).json({ message: 'Server error' });
-    }
-});
-
-// Create Server Route (Group chat)
+// Routes
 const createServerRoute = async (req, res) => {
     const { name } = req.body;
 
@@ -123,24 +48,22 @@ const createServerRoute = async (req, res) => {
 
     try {
         // Create the new server (group chat)
-        const newGroup = await prisma.groupChat.create({
-            data: {
-                name,
-                createdById: req.user.userId,
-            }
-        });
+        const result = await pool.query(
+            'INSERT INTO group_chats (name, created_by) VALUES ($1, $2) RETURNING id, name, created_by',
+            [name, req.user.userId]
+        );
+
+        const group = result.rows[0];
 
         // Add the creator as the first member of the group
-        await prisma.groupMember.create({
-            data: {
-                groupId: newGroup.id,
-                userId: req.user.userId
-            }
-        });
+        await pool.query(
+            'INSERT INTO group_members (group_id, user_id) VALUES ($1, $2)',
+            [group.id, req.user.userId]
+        );
 
         res.status(201).json({
             message: 'Server created successfully',
-            server: newGroup
+            server: group
         });
     } catch (error) {
         console.error('Create server error:', error);
@@ -149,7 +72,7 @@ const createServerRoute = async (req, res) => {
 };
 
 // API to create a new server (group chat)
-app.post('/api/create-server', authMiddleware, createServerRoute);
+app.post('/api/create-server', authenticateToken, createServerRoute);
 
 // Socket.io connection handling
 io.on('connection', (socket) => {
@@ -165,22 +88,22 @@ io.on('connection', (socket) => {
 
         try {
             // Save the message to the database
-            const newMessage = await prisma.message.create({
-                data: {
-                    senderId,
-                    receiverId,
-                    message,
-                }
-            });
+            const result = await pool.query(
+                'INSERT INTO messages (sender_id, receiver_id, message) VALUES ($1, $2, $3) RETURNING *',
+                [senderId, receiverId, message]
+            );
+
+            const newMessage = result.rows[0];
 
             // Get sender's username
-            const sender = await prisma.user.findUnique({
-                where: { id: senderId }
-            });
+            const senderResult = await pool.query(
+                'SELECT username FROM users WHERE id = $1',
+                [senderId]
+            );
 
             const messageWithUsername = {
                 ...newMessage,
-                sender_username: sender.username
+                sender_username: senderResult.rows[0].username
             };
 
             // Emit to receiver via socket

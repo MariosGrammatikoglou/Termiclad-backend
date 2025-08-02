@@ -15,7 +15,8 @@ const httpServer = createServer(app);
 const io = new Server(httpServer, {
     cors: {
         origin: ['http://localhost:3000', 'https://your-frontend-url.vercel.app'],
-        methods: ['GET', 'POST']
+        methods: ['GET', 'POST'],
+        allowedHeaders: ['Content-Type', 'Authorization'],
     }
 });
 

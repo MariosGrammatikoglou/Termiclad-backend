@@ -1,4 +1,4 @@
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs'); // you're using bcryptjs
 const jwt = require('jsonwebtoken');
 const prisma = require('../prisma/client');
 
@@ -39,7 +39,14 @@ exports.register = async (req, res) => {
             { expiresIn: '7d' }
         );
 
-        res.status(201).json({ user, token });
+        res.status(201).json({
+            user: {
+                id: user.id,
+                username: user.username,
+                email: user.email
+            },
+            token
+        });
     } catch (error) {
         console.error('Register error:', error);
         res.status(500).json({ message: 'Server error' });
@@ -71,7 +78,14 @@ exports.login = async (req, res) => {
             { expiresIn: '7d' }
         );
 
-        res.json({ user, token });
+        res.json({
+            user: {
+                id: user.id,
+                username: user.username,
+                email: user.email
+            },
+            token
+        });
     } catch (error) {
         console.error('Login error:', error);
         res.status(500).json({ message: 'Server error' });

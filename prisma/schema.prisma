@@ -1,33 +1,37 @@
 generator client {
   provider = "prisma-client-js"
 }
+
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
 model User {
-  id        Int      @id @default(autoincrement())
-  username  String   @unique
-  email     String   @unique
-  password  String
-  messages  Message[] @relation("SentMessages")
-  createdAt DateTime @default(now())
+  id         Int           @id @default(autoincrement())
+  username   String        @unique
+  email      String        @unique
+  password   String
+  messages   Message[]     @relation("SentMessages")
+  createdAt  DateTime      @default(now())
+  groupChats GroupChat[]   @relation("CreatedGroups", fields: [], references: []) // User creates many groups
+  memberships GroupMember[]
 }
 
 model Message {
-  id         Int      @id @default(autoincrement())
-  sender     User     @relation("SentMessages", fields: [senderId], references: [id])
+  id         Int       @id @default(autoincrement())
+  sender     User      @relation("SentMessages", fields: [senderId], references: [id])
   senderId   Int
   receiverId Int
   message    String
-  createdAt  DateTime @default(now())
+  createdAt  DateTime  @default(now())
 }
 
 model GroupChat {
   id         Int           @id @default(autoincrement())
   name       String
   createdBy  Int
+  creator    User          @relation("CreatedGroups", fields: [createdBy], references: [id])
   members    GroupMember[]
   createdAt  DateTime      @default(now())
 }
@@ -37,4 +41,7 @@ model GroupMember {
   groupId  Int
   userId   Int
   group    GroupChat @relation(fields: [groupId], references: [id])
+  user     User      @relation(fields: [userId], references: [id])
+  
+  @@unique([groupId, userId])
 }

@@ -5,20 +5,21 @@ const { createServer } = require('http');
 const { Server } = require('socket.io');
 const authRoutes = require('./routes/authRoutes');
 const serverRoutes = require('./routes/serverRoutes');
-const authenticateToken = require('./middlewares/authMiddleware');
 const prisma = require('./prisma/client');
 
 const app = express();
 const httpServer = createServer(app);
+
 const io = new Server(httpServer, {
     cors: {
-        origin: ["http://localhost:3000", "https://your‑frontend‑url.vercel.app"],
-        methods: ["GET", "POST"]
+        origin: ['http://localhost:3000', 'https://your-frontend-url.vercel.app'],
+        methods: ['GET', 'POST']
     }
 });
 
 app.use(cors());
 app.use(express.json());
+
 app.use('/api', authRoutes);
 app.use('/api', serverRoutes);
 app.get('/api/health', (req, res) => res.json({ status: 'OK' }));

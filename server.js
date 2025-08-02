@@ -1,3 +1,4 @@
+// server.js or app.js
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -5,6 +6,7 @@ const { createServer } = require('http');
 const { Server } = require('socket.io');
 const authRoutes = require('./routes/authRoutes');
 const serverRoutes = require('./routes/serverRoutes');
+const userRoutes = require('./routes/userRoutes'); // Import new user routes
 const prisma = require('./prisma/client');
 
 const app = express();
@@ -20,10 +22,14 @@ const io = new Server(httpServer, {
 app.use(cors());
 app.use(express.json());
 
+// Use routes
 app.use('/api', authRoutes);
 app.use('/api', serverRoutes);
+app.use('/api', userRoutes); // Add the new user routes here
+
 app.get('/api/health', (req, res) => res.json({ status: 'OK' }));
 
+// WebSocket connection
 io.on('connection', (socket) => {
     console.log('Socket connected:', socket.id);
 
